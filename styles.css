@@ -1,17 +1,28 @@
 #instahyre-salary-panel {
   position: fixed;
-  top: 88px;
-  right: 24px;
+  top: 72px;
+  right: 20px;
+  bottom: 20px;
   z-index: 2147483646;
-  width: 320px;
+  width: 340px;
   max-width: calc(100vw - 32px);
-  padding: 16px 18px 14px;
-  border-radius: 12px;
+  max-height: calc(100vh - 92px);
+  display: flex;
+  flex-direction: column;
+  border-radius: 14px;
   border: 1px solid rgba(15, 23, 42, 0.08);
   background: #ffffff;
-  box-shadow: 0 18px 40px rgba(15, 23, 42, 0.18);
+  box-shadow: 0 20px 48px rgba(15, 23, 42, 0.18);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   color: #0f172a;
+  overflow: hidden;
+}
+
+#instahyre-salary-panel .instahyre-salary-header {
+  flex-shrink: 0;
+  padding: 14px 40px 12px 18px;
+  border-bottom: 1px solid rgba(15, 23, 42, 0.07);
+  background: #ffffff;
 }
 
 #instahyre-salary-panel .instahyre-salary-close {
@@ -24,10 +35,26 @@
   font-size: 20px;
   line-height: 1;
   cursor: pointer;
+  z-index: 1;
+}
+
+#instahyre-salary-panel .instahyre-salary-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+#instahyre-salary-panel .instahyre-salary-logo {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.25);
 }
 
 #instahyre-salary-panel .instahyre-salary-kicker {
-  margin: 0 0 4px;
+  margin: 0;
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.08em;
@@ -48,9 +75,29 @@
 }
 
 #instahyre-salary-panel .instahyre-salary-body {
-  margin-top: 14px;
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 14px 18px 18px;
   display: grid;
   gap: 14px;
+  align-content: start;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(15, 23, 42, 0.15) transparent;
+}
+
+#instahyre-salary-panel .instahyre-salary-body::-webkit-scrollbar {
+  width: 4px;
+}
+
+#instahyre-salary-panel .instahyre-salary-body::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+#instahyre-salary-panel .instahyre-salary-body::-webkit-scrollbar-thumb {
+  background: rgba(15, 23, 42, 0.15);
+  border-radius: 4px;
 }
 
 #instahyre-salary-panel .instahyre-salary-section {
@@ -131,4 +178,75 @@
   font-size: 12px;
   line-height: 1.5;
   color: #64748b;
+}
+
+#instahyre-salary-panel .instahyre-salary-badge {
+  display: inline-block;
+  align-self: flex-start;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #fef3c7;
+  color: #92400e;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+#instahyre-salary-panel .instahyre-salary-auth {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #eff6ff;
+  border: 1px solid rgba(37, 99, 235, 0.18);
+}
+
+#instahyre-salary-panel .instahyre-salary-auth-title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  color: #1d4ed8;
+}
+
+#instahyre-salary-panel .instahyre-salary-auth-copy {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: #475569;
+}
+
+#instahyre-salary-panel .instahyre-salary-auth-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+#instahyre-salary-panel .instahyre-salary-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: #2563eb;
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 700;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+#instahyre-salary-panel .instahyre-salary-button:hover {
+  background: #1d4ed8;
+}
+
+#instahyre-salary-panel .instahyre-salary-button-secondary {
+  background: #ffffff;
+  color: #2563eb;
+  border: 1px solid rgba(37, 99, 235, 0.35);
+}
+
+#instahyre-salary-panel .instahyre-salary-button-secondary:hover {
+  background: #f8fafc;
 }

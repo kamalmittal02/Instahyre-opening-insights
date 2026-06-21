@@ -1,8 +1,26 @@
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+const PROVIDERS_ENABLED = {
+  Glassdoor: false,
+  AmbitionBox: true,
+  LeetCode: false,
+};
 const USER_AGENT =
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+const AMBITIONBOX_LOGIN_URL = "https://www.ambitionbox.com/login";
+const AMBITIONBOX_ORIGIN = "https://www.ambitionbox.com";
+const AMBITIONBOX_TAB_URL = `${AMBITIONBOX_ORIGIN}/salaries`;
+
+let cachedAmbitionBoxBuildId = null;
+let ambitionBoxTabPromise = null;
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message.type === "CHECK_AMBITIONBOX_AUTH") {
+    checkAmbitionBoxAuth()
+      .then((result) => sendResponse({ ok: true, result }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
   if (message.type !== "FETCH_EXTERNAL_SALARY") return;
 
   fetchExternalSalary(message.payload)
@@ -21,7 +39,7 @@ async function fetchExternalSalary(payload) {
     { name: "Glassdoor", fetch: fetchGlassdoorSalary },
     { name: "AmbitionBox", fetch: fetchAmbitionBoxSalary },
     { name: "LeetCode", fetch: fetchLeetCodeSalary },
-  ];
+  ].filter((provider) => PROVIDERS_ENABLED[provider.name]);
 
   const attempts = [];
 
@@ -44,6 +62,9 @@ async function fetchExternalSalary(payload) {
     found: false,
     attempts,
     links: buildSearchLinks(payload),
+    needsAmbitionBoxLogin: await shouldPromptAmbitionBoxLogin(attempts),
+    ambitionBoxSessionExpired: await shouldShowAmbitionBoxSessionHint(attempts),
+    ambitionBoxLoginUrl: AMBITIONBOX_LOGIN_URL,
   };
 }
 
@@ -86,67 +107,116 @@ async function fetchGlassdoorSalary({ companyName, jobTitle }) {
   };
 }
 
+const AMBITIONBOX_ROLE_SIMILARITY_THRESHOLD = 0.3;
+const AMBITIONBOX_MAX_ROLE_LOOKUPS = 8;
+
 async function fetchAmbitionBoxSalary({ companyName, jobTitle, location }) {
   const company = await searchAmbitionBoxCompany(companyName);
   if (!company?.url) return null;
 
-  const companyPage = await fetchAmbitionBoxPage(
-    `https://www.ambitionbox.com/salaries/${company.url}-salaries`
-  );
-  const pageProps = companyPage?.props?.pageProps;
-  if (!pageProps) return null;
+  const companyUrl = `https://www.ambitionbox.com/salaries/${company.url}-salaries`;
 
-  const roleCandidates = await buildAmbitionBoxRoleCandidates(jobTitle, pageProps.jobProfiles);
-  let bestRoleResult = null;
+  // Fetch company overview — null on 404 (company exists in search but has no salary page yet)
+  const companyPage = await fetchAmbitionBoxPage(companyUrl);
+  const pageProps = companyPage?.props?.pageProps ?? null;
 
-  for (const roleSlug of roleCandidates) {
-    const rolePage = await fetchAmbitionBoxPage(
-      `https://www.ambitionbox.com/salaries/${company.url}-salaries/${roleSlug}`
-    );
-    const roleSummary = rolePage?.props?.pageProps?.salaryData?.data?.summaryData;
-    const parsed = parseAmbitionBoxSummary(roleSummary, roleSlug);
+  const resolvedCompanyName = pageProps?.companyName || company.name;
+  const companySummary = pageProps ? parseAmbitionBoxSummary(pageProps.salariesSummaryData) : null;
+  const normalizedTitle = normalizeText(jobTitle);
 
-    if (parsed?.hasRoleRange) {
-      bestRoleResult = {
-        ...parsed,
-        roleSlug,
-        roleName: rolePage?.props?.pageProps?.salaryData?.data?.profileInfo?.profileName || roleSlug,
-      };
+  // Build role candidates from page's jobProfiles (may be empty if page 404'd) + API search
+  const roleCandidates = await buildAmbitionBoxRoleCandidates(jobTitle, pageProps?.jobProfiles || []);
+
+  let exactRole = null;
+  let similarRole = null;
+
+  for (const candidate of roleCandidates.slice(0, AMBITIONBOX_MAX_ROLE_LOOKUPS)) {
+    // fetchAmbitionBoxPage returns null on 404 — skip gracefully
+    const rolePage = await fetchAmbitionBoxPage(`${companyUrl}/${candidate.slug}`);
+    if (!rolePage) continue;
+
+    const data = rolePage?.props?.pageProps?.salaryData?.data;
+    const parsed = parseAmbitionBoxSummary(data?.summaryData, candidate.slug);
+    if (!parsed?.hasRoleRange && !parsed?.average) continue;
+
+    const matchedName = data?.profileInfo?.profileName || titleCase(candidate.slug);
+    const isExact =
+      normalizeText(matchedName) === normalizedTitle ||
+      normalizeText(candidate.slug.replace(/-/g, " ")) === normalizedTitle;
+    const isRelated =
+      isExact || candidate.fromSearch || candidate.score >= AMBITIONBOX_ROLE_SIMILARITY_THRESHOLD;
+
+    const roleResult = {
+      matchedName,
+      isExact,
+      range: parsed.range,
+      average: parsed.average,
+      reports: parsed.reports,
+      experience: parsed.experience,
+      url: `${companyUrl}/${candidate.slug}`,
+    };
+
+    if (isExact) {
+      exactRole = roleResult;
       break;
+    }
+
+    if (isRelated && !similarRole) {
+      similarRole = roleResult;
     }
   }
 
-  if (bestRoleResult) {
+  const role = exactRole || similarRole;
+
+  // Return null only if both company page AND role lookup are completely empty
+  if (!companySummary && !role && !pageProps) {
+    // Company page 404'd and role search also empty — provide a minimal result with link
+    // so the user at least gets the "not found" UI with the correct AmbitionBox link
+    const titleSlug = slugify(jobTitle);
     return {
       found: true,
       source: "AmbitionBox",
-      companyName: pageProps.companyName || company.name,
-      jobTitle: bestRoleResult.roleName || jobTitle,
-      range: bestRoleResult.range,
-      average: bestRoleResult.average,
-      reports: bestRoleResult.reports,
-      experience: bestRoleResult.experience,
+      companyName: resolvedCompanyName,
+      requestedTitle: jobTitle,
       location: location || null,
-      url: `https://www.ambitionbox.com/salaries/${company.url}-salaries/${bestRoleResult.roleSlug}`,
-      confidence: "high",
+      company: { range: null, average: null, reports: null, url: companyUrl, noData: true },
+      role: null,
+      roleNotFound: true,
+      url: `${companyUrl}/${titleSlug}`,
+      confidence: "low",
     };
   }
 
-  const companySummary = parseAmbitionBoxSummary(pageProps.salariesSummaryData);
-  if (!companySummary) return null;
+  if (!companySummary && !role) return null;
 
   return {
     found: true,
     source: "AmbitionBox",
-    companyName: pageProps.companyName || company.name,
-    jobTitle,
-    range: companySummary.range,
-    average: companySummary.average,
-    reports: companySummary.reports,
+    companyName: resolvedCompanyName,
+    requestedTitle: jobTitle,
     location: location || null,
-    url: `https://www.ambitionbox.com/salaries/${company.url}-salaries`,
-    note: "Company-wide average on AmbitionBox (role-specific data not found).",
-    confidence: "medium",
+    company: {
+      range: companySummary?.range || null,
+      average: companySummary?.average || null,
+      reports: companySummary?.reports || null,
+      url: companyUrl,
+      noData: !companySummary,
+    },
+    role: role
+      ? {
+          requestedTitle: jobTitle,
+          matchedName: role.matchedName,
+          isExact: role.isExact,
+          range: role.range,
+          average: role.average,
+          reports: role.reports,
+          experience: role.experience,
+          url: role.url,
+        }
+      : null,
+    roleNotFound: !role,
+    url: role?.url || companyUrl,
+    confidence: role ? (role.isExact ? "high" : "medium") : "medium",
   };
 }
 
@@ -205,28 +275,67 @@ async function searchAmbitionBoxCompany(companyName) {
 }
 
 async function buildAmbitionBoxRoleCandidates(jobTitle, jobProfiles) {
-  const candidates = new Set();
-  candidates.add(slugify(jobTitle));
+  const normalizedTitle = normalizeText(jobTitle);
+  const candidates = new Map();
+
+  const addCandidate = (slug, fromSearch) => {
+    if (!slug) return;
+    const score = similarityScore(normalizedTitle, normalizeText(slug.replace(/-/g, " ")));
+    const existing = candidates.get(slug);
+    if (!existing) {
+      candidates.set(slug, { slug, fromSearch, score });
+    } else if (fromSearch) {
+      existing.fromSearch = true;
+    }
+  };
+
+  addCandidate(slugify(jobTitle), true);
 
   const profileSearch = await fetchJson(
     `https://www.ambitionbox.com/api/v2/search?query=${encodeURIComponent(jobTitle)}&category=jobProfile`
   );
-
   for (const item of profileSearch?.data || []) {
-    if (item.UrlName) candidates.add(item.UrlName);
+    addCandidate(item.UrlName, true);
   }
 
-  const rankedProfiles = rankProfiles(jobTitle, jobProfiles || []);
-  for (const profile of rankedProfiles.slice(0, 5)) {
-    if (profile.urlName) candidates.add(profile.urlName);
+  for (const profile of jobProfiles || []) {
+    addCandidate(profile.urlName, false);
   }
 
-  return [...candidates].filter(Boolean);
+  return [...candidates.values()].sort((a, b) => {
+    if (a.fromSearch !== b.fromSearch) return a.fromSearch ? -1 : 1;
+    return b.score - a.score;
+  });
 }
 
 async function fetchAmbitionBoxPage(url) {
-  const html = await fetchText(url, { site: "ambitionbox" });
-  return parseNextData(html);
+  const path = new URL(url).pathname.replace(/\/$/, "");
+  const buildId = await getAmbitionBoxBuildId();
+
+  if (buildId) {
+    try {
+      const data = await fetchAmbitionBoxNextData(`/_next/data/${buildId}${path}.json`);
+      if (data?.pageProps) {
+        return { props: { pageProps: data.pageProps }, buildId: data.buildId || buildId };
+      }
+    } catch (error) {
+      if (isAuthError(error)) throw error;
+      // 404 or other non-auth errors → fall through to HTML fetch
+    }
+  }
+
+  try {
+    const html = await fetchText(url, { site: "ambitionbox" });
+    const nextData = parseNextData(html);
+    if (nextData?.buildId) {
+      await storeAmbitionBoxBuildId(nextData.buildId);
+    }
+    return nextData;
+  } catch (error) {
+    if (isAuthError(error)) throw error;
+    // 404 / page doesn't exist on AmbitionBox → treat as no data
+    return null;
+  }
 }
 
 function parseAmbitionBoxSummary(summary, roleSlug) {
@@ -251,18 +360,6 @@ function parseAmbitionBoxSummary(summary, roleSlug) {
   };
 }
 
-function rankProfiles(jobTitle, profiles) {
-  const target = normalizeText(jobTitle);
-
-  return [...profiles]
-    .map((profile) => {
-      const slug = profile.urlName || "";
-      const score = similarityScore(target, normalizeText(slug.replace(/-/g, " ")));
-      return { ...profile, score };
-    })
-    .sort((a, b) => b.score - a.score);
-}
-
 function parseNextData(html) {
   const match = html.match(
     /<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/
@@ -277,42 +374,243 @@ function parseNextData(html) {
 }
 
 async function fetchText(url, { site }) {
+  if (site === "ambitionbox") {
+    return fetchAmbitionBoxViaBridge(url, { json: false });
+  }
+
   const response = await fetch(url, {
-    headers: buildHeaders(site),
+    headers: await buildHeaders(site),
     redirect: "follow",
   });
 
   if (!response.ok) {
-    throw new Error(`HTTP ${response.status}`);
+    throw createHttpError(response.status, site);
   }
 
   return response.text();
 }
 
 async function fetchJson(url) {
-  const response = await fetch(url, {
-    headers: buildHeaders("ambitionbox"),
-  });
-
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}`);
-  }
-
-  return response.json();
+  return fetchAmbitionBoxViaBridge(url, { json: true });
 }
 
-function buildHeaders(site) {
+async function fetchAmbitionBoxNextData(path) {
+  return fetchAmbitionBoxViaBridge(`${AMBITIONBOX_ORIGIN}${path}`, {
+    json: true,
+    headers: { "x-nextjs-data": "1" },
+  });
+}
+
+async function fetchAmbitionBoxViaBridge(url, { json = false, headers = {} } = {}) {
+  const tabId = await ensureAmbitionBoxTab();
+  const response = await runAmbitionBoxFetch(tabId, { url, json, headers });
+
+  if (!response) {
+    throw new Error("AmbitionBox bridge unavailable. Reload the extension and try again.");
+  }
+
+  if (response.error) {
+    throw new Error(response.error);
+  }
+
+  if (!response.ok) {
+    throw createHttpError(response.status || 0, "ambitionbox");
+  }
+
+  return response.body;
+}
+
+async function runAmbitionBoxFetch(tabId, { url, json, headers }, attempt = 0) {
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      args: [url, json, headers],
+      func: async (fetchUrl, asJson, extraHeaders) => {
+        try {
+          const res = await fetch(fetchUrl, {
+            method: "GET",
+            credentials: "include",
+            headers: {
+              accept: asJson
+                ? "application/json, text/plain, */*"
+                : "text/html,application/json,*/*",
+              ...(extraHeaders || {}),
+            },
+          });
+
+          const body = asJson ? await res.json() : await res.text();
+          return { ok: res.ok, status: res.status, body };
+        } catch (err) {
+          return { ok: false, status: 0, error: String(err && err.message ? err.message : err) };
+        }
+      },
+    });
+
+    return results?.[0]?.result || null;
+  } catch (error) {
+    if (attempt >= 2) {
+      throw new Error("AmbitionBox bridge unavailable. Reload the extension and try again.");
+    }
+
+    await delay(600);
+    return runAmbitionBoxFetch(tabId, { url, json, headers }, attempt + 1);
+  }
+}
+
+async function ensureAmbitionBoxTab() {
+  if (ambitionBoxTabPromise) {
+    return ambitionBoxTabPromise;
+  }
+
+  ambitionBoxTabPromise = (async () => {
+    const existingTabs = await chrome.tabs.query({
+      url: ["https://www.ambitionbox.com/*", "https://ambitionbox.com/*"],
+    });
+
+    if (existingTabs.length) {
+      return existingTabs[0].id;
+    }
+
+    const tab = await chrome.tabs.create({
+      url: AMBITIONBOX_TAB_URL,
+      active: false,
+    });
+
+    await waitForTabComplete(tab.id);
+    await delay(400);
+    return tab.id;
+  })();
+
+  try {
+    return await ambitionBoxTabPromise;
+  } finally {
+    ambitionBoxTabPromise = null;
+  }
+}
+
+function waitForTabComplete(tabId) {
+  return new Promise((resolve) => {
+    chrome.tabs.get(tabId, (tab) => {
+      if (chrome.runtime.lastError) {
+        resolve();
+        return;
+      }
+
+      if (tab?.status === "complete") {
+        resolve();
+        return;
+      }
+
+      const listener = (updatedTabId, info) => {
+        if (updatedTabId === tabId && info.status === "complete") {
+          chrome.tabs.onUpdated.removeListener(listener);
+          resolve();
+        }
+      };
+
+      chrome.tabs.onUpdated.addListener(listener);
+    });
+  });
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function buildHeaders(site) {
   const headers = {
     accept: "text/html,application/json,*/*",
     "accept-language": "en-US,en;q=0.9",
     "user-agent": USER_AGENT,
   };
 
-  if (site === "ambitionbox") {
-    headers.accept = "application/json, text/plain, */*";
+  if (site === "glassdoor") {
+    headers.accept = "text/html,application/json,*/*";
   }
 
   return headers;
+}
+
+async function getAmbitionBoxCookies() {
+  const byUrl = await chrome.cookies.getAll({ url: `${AMBITIONBOX_ORIGIN}/` });
+  if (byUrl.length) return byUrl;
+
+  return chrome.cookies.getAll({ domain: ".ambitionbox.com" });
+}
+
+async function isAmbitionBoxAuthenticated() {
+  const cookies = await getAmbitionBoxCookies();
+  return cookies.some(
+    (cookie) =>
+      (cookie.name === "AT" || cookie.name === "RT" || cookie.name === "UAC_I") && cookie.value
+  );
+}
+
+async function checkAmbitionBoxAuth() {
+  const authenticated = await isAmbitionBoxAuthenticated();
+  return {
+    authenticated,
+    loginUrl: AMBITIONBOX_LOGIN_URL,
+  };
+}
+
+async function shouldPromptAmbitionBoxLogin(attempts) {
+  const ambitionBoxFailed = attempts.some(
+    (attempt) => attempt.startsWith("AmbitionBox:") && /HTTP 40[13]/.test(attempt)
+  );
+  if (!ambitionBoxFailed) return false;
+
+  const authenticated = await isAmbitionBoxAuthenticated();
+  return !authenticated;
+}
+
+async function shouldShowAmbitionBoxSessionHint(attempts) {
+  const ambitionBoxFailed = attempts.some(
+    (attempt) => attempt.startsWith("AmbitionBox:") && /HTTP 40[13]/.test(attempt)
+  );
+  if (!ambitionBoxFailed) return false;
+
+  return await isAmbitionBoxAuthenticated();
+}
+
+function createHttpError(status, site) {
+  const error = new Error(`HTTP ${status}`);
+  error.status = status;
+  error.site = site;
+  return error;
+}
+
+function isAuthError(error) {
+  return error?.site === "ambitionbox" && (error.status === 401 || error.status === 403);
+}
+
+async function getAmbitionBoxBuildId() {
+  if (cachedAmbitionBoxBuildId) return cachedAmbitionBoxBuildId;
+
+  const stored = await chrome.storage.local.get("ambitionboxBuildId");
+  if (stored.ambitionboxBuildId) {
+    cachedAmbitionBoxBuildId = stored.ambitionboxBuildId;
+    return cachedAmbitionBoxBuildId;
+  }
+
+  try {
+    const html = await fetchAmbitionBoxViaBridge(AMBITIONBOX_TAB_URL, { json: false });
+    const nextData = parseNextData(html);
+    if (nextData?.buildId) {
+      await storeAmbitionBoxBuildId(nextData.buildId);
+      return nextData.buildId;
+    }
+  } catch (error) {
+    if (isAuthError(error)) throw error;
+  }
+
+  return null;
+}
+
+async function storeAmbitionBoxBuildId(buildId) {
+  cachedAmbitionBoxBuildId = buildId;
+  await chrome.storage.local.set({ ambitionboxBuildId: buildId });
 }
 
 function buildSearchLinks({ companyName, jobTitle }) {
@@ -336,6 +634,8 @@ async function readCache(key) {
   const entry = stored[storageKey];
   if (!entry) return null;
   if (Date.now() - entry.fetchedAt > CACHE_TTL_MS) return null;
+  if (entry.provider && !PROVIDERS_ENABLED[entry.provider]) return null;
+  if (entry.source && !PROVIDERS_ENABLED[entry.source]) return null;
   return entry;
 }
 
@@ -345,7 +645,18 @@ async function writeCache(key, value) {
 }
 
 function slugify(value) {
-  return normalizeText(value).replace(/\s+/g, "-");
+  return normalizeText(value)
+    .replace(/\s+-\s+/g, "-")
+    .replace(/\s+/g, "-")
+    .replace(/-{2,}/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
+function titleCase(value) {
+  return String(value || "")
+    .replace(/-/g, " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase())
+    .trim();
 }
 
 function normalizeText(value) {
