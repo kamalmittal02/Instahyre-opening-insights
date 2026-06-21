@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "Instahyre Salary Insight",
+  "version": "1.1.0",
+  "description": "Shows salary data from Glassdoor, AmbitionBox, or LeetCode when you open a job on Instahyre.",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://www.instahyre.com/*",
+    "https://www.ambitionbox.com/*",
+    "https://www.glassdoor.co.in/*",
+    "https://www.glassdoor.com/*",
+    "https://leetcode.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.instahyre.com/*"],
+      "js": ["content.js"],
+      "css": ["styles.css"],
+      "run_at": "document_start"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["inject.js"],
+      "matches": ["https://www.instahyre.com/*"]
+    }
+  ],
+  "icons": {
+    "128": "icons/icon128.png"
+  }
+}
