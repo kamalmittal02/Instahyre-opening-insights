@@ -1,7 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none" role="img" aria-label="Salary insight">
   <rect width="32" height="32" rx="8" fill="#2563eb"/>
-  <path d="M9 10h7.5c2.07 0 3.75 1.4 3.75 3.12S18.57 16.25 16.5 16.25H12v5.75H9V10z" fill="#ffffff"/>
-  <path d="M12 13.5h4.2c.97 0 1.75.62 1.75 1.38s-.78 1.37-1.75 1.37H12V13.5z" fill="#2563eb"/>
-  <path d="M19 21l3-4 2.5 2 3.5-6" stroke="#bfdbfe" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
-  <circle cx="24.5" cy="13" r="1.25" fill="#bfdbfe"/>
+  <rect x="8" y="18" width="3.5" height="6" rx="1" fill="#93c5fd"/>
+  <rect x="13" y="14.5" width="3.5" height="9.5" rx="1" fill="#bfdbfe"/>
+  <rect x="18" y="11" width="3.5" height="13" rx="1" fill="#ffffff"/>
+  <path d="M9 21.5l4.5-3.5 3.5 2.5 6-7.5" stroke="#ffffff" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="23" cy="13" r="1.35" fill="#ffffff"/>
 </svg>
